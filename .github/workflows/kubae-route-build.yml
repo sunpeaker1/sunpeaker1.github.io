@@ -1,9 +1,9 @@
-name: Build Kubae Route V0.2.1
+name: Build Kubae Navi V0.3.0
 
 on:
   push:
     branches:
-      - kubae-navi-route-v1
+      - kubae-navi-v03-guidance
     paths:
       - 'kubae-route/**'
       - '.github/workflows/kubae-route-build.yml'
@@ -47,25 +47,25 @@ jobs:
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Rename APK
-        run: cp kubae-route/app/build/outputs/apk/debug/app-debug.apk KubaeNavi-Route-V0.2.1-debug.apk
+        run: cp kubae-route/app/build/outputs/apk/debug/app-debug.apk KubaeNavi-V0.3.0-debug.apk
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KubaeNavi-Route-V0.2.1-debug
-          path: KubaeNavi-Route-V0.2.1-debug.apk
+          name: KubaeNavi-V0.3.0-debug
+          path: KubaeNavi-V0.3.0-debug.apk
           retention-days: 14
 
       - name: Publish test Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "kubae-route-v0.2.1" >/dev/null 2>&1; then
-            gh release upload "kubae-route-v0.2.1" KubaeNavi-Route-V0.2.1-debug.apk --clobber
+          if gh release view "kubae-v0.3.0" >/dev/null 2>&1; then
+            gh release upload "kubae-v0.3.0" KubaeNavi-V0.3.0-debug.apk --clobber
           else
-            gh release create "kubae-route-v0.2.1" KubaeNavi-Route-V0.2.1-debug.apk \
+            gh release create "kubae-v0.3.0" KubaeNavi-V0.3.0-debug.apk \
               --target "$GITHUB_SHA" \
-              --title "KubaeNavi Route V0.2.1 test APK" \
-              --notes "Corrected route-based prototype. No screen mirroring. Protected RiderJjakkung/JjakkungNavi/QuickJjakkung code unchanged." \
+              --title "KubaeNavi V0.3.0 guidance test APK" \
+              --notes "Full-screen turn guidance prototype: heading-up map, auto zoom, top turn card and ETA bar. No screen mirroring. Protected RiderJjakkung/JjakkungNavi/QuickJjakkung code unchanged." \
               --prerelease
           fi
