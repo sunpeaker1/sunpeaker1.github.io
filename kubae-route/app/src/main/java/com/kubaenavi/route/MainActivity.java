@@ -85,6 +85,10 @@ public class MainActivity extends Activity implements LocationListener {
     private EditText destLat;
     private EditText destLon;
     private Button routeButton;
+    private Button locateButton;
+
+    private Location lastNavLocation;
+    private float lastCourseDegrees = Float.NaN;
 
     private volatile boolean followLocation = true;
     private volatile boolean navigationActive = false;
@@ -276,29 +280,33 @@ public class MainActivity extends Activity implements LocationListener {
         bottomLp.setMargins(dp(10), 0, dp(10), dp(12));
         root.addView(bottomBar, bottomLp);
 
-        // 우측 현재위치 복귀 버튼
-        Button locateButton = new Button(this);
-        locateButton.setText("◎");
-        locateButton.setTextSize(28);
-        locateButton.setTextColor(TEXT);
+        // 사용자가 지도를 움직였을 때만 나타나는 현재위치 복귀 버튼
+        locateButton = new Button(this);
+        locateButton.setText("➤  현재위치로");
+        locateButton.setTextSize(16);
+        locateButton.setTypeface(Typeface.DEFAULT_BOLD);
+        locateButton.setTextColor(Color.WHITE);
         locateButton.setAllCaps(false);
-        locateButton.setBackground(round(0xf7ffffff, 22, 1, 0xffe0e5eb));
+        locateButton.setBackground(round(0xee202124, 24, 0, 0));
         locateButton.setStateListAnimator(null);
+        locateButton.setVisibility(View.GONE);
         locateButton.setOnClickListener(v -> {
             followLocation = true;
+            locateButton.setVisibility(View.GONE);
             if (currentPoint != null) {
                 map.getController().animateTo(currentPoint);
             }
-            toast("현재 위치 자동추적 ON");
+            applyHeadingUp(lastNavLocation);
         });
-        FrameLayout.LayoutParams locateLp = new FrameLayout.LayoutParams(dp(62), dp(62));
-        locateLp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-        locateLp.setMargins(0, 0, dp(12), 0);
+        FrameLayout.LayoutParams locateLp = new FrameLayout.LayoutParams(dp(190), dp(58));
+        locateLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        locateLp.setMargins(0, 0, 0, dp(118));
         root.addView(locateButton, locateLp);
 
         map.setOnTouchListener((v, event) -> {
             if (navigationActive && event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
                 followLocation = false;
+                locateButton.setVisibility(View.VISIBLE);
             }
             return false;
         });
@@ -424,11 +432,11 @@ public class MainActivity extends Activity implements LocationListener {
         nearestRouteIndex = findNearestRouteIndex(currentPoint, activeRoute.points, nearestRouteIndex);
 
         if (followLocation) {
-            if (location.hasBearing() && location.getSpeed() > 1.2f) {
-                map.setMapOrientation(-location.getBearing());
-            }
+            locateButton.setVisibility(View.GONE);
+            applyHeadingUp(location);
             map.getController().animateTo(currentPoint);
         }
+        rememberNavigationLocation(location);
 
         double remainingMeters = distanceAlong(activeRoute.points, nearestRouteIndex, activeRoute.points.size() - 1);
         Maneuver next = null;
@@ -499,6 +507,62 @@ public class MainActivity extends Activity implements LocationListener {
             turnDistance.setText("도착");
             centerTurn.setVisibility(View.GONE);
         }
+    }
+
+    private void applyHeadingUp(Location location) {
+        if (!navigationActive || !followLocation || location == null) return;
+
+        Float course = resolveCourseDegrees(location);
+        if (course == null) return;
+
+        float smoothed = smoothCourse(lastCourseDegrees, course);
+        lastCourseDegrees = smoothed;
+
+        // osmdroid 공식 heading-up 방식: 진행방향이 화면 위를 향하도록 360 - bearing.
+        float orientation = (360f - smoothed) % 360f;
+        if (orientation < 0f) orientation += 360f;
+        map.setMapOrientation(orientation, true);
+    }
+
+    private Float resolveCourseDegrees(Location location) {
+        if (location.hasBearing() && location.getSpeed() >= 0.7f) {
+            return normalizeDegrees(location.getBearing());
+        }
+
+        if (lastNavLocation != null) {
+            float moved = lastNavLocation.distanceTo(location);
+            if (moved >= 2.5f) {
+                return normalizeDegrees(lastNavLocation.bearingTo(location));
+            }
+        }
+
+        if (!Float.isNaN(lastCourseDegrees)) {
+            return lastCourseDegrees;
+        }
+        return null;
+    }
+
+    private void rememberNavigationLocation(Location location) {
+        if (location == null) return;
+        if (lastNavLocation == null || lastNavLocation.distanceTo(location) >= 1.5f) {
+            lastNavLocation = new Location(location);
+        }
+    }
+
+    private static float normalizeDegrees(float degrees) {
+        float d = degrees % 360f;
+        if (d < 0f) d += 360f;
+        return d;
+    }
+
+    private static float smoothCourse(float previous, float current) {
+        if (Float.isNaN(previous)) return normalizeDegrees(current);
+
+        float delta = normalizeDegrees(current - previous);
+        if (delta > 180f) delta -= 360f;
+
+        // 급격한 GPS 튐을 완화하되 골목 회전은 따라갈 수 있게 45% 반영.
+        return normalizeDegrees(previous + delta * 0.45f);
     }
 
     private void maybeAutoRoute() {
@@ -721,6 +785,9 @@ public class MainActivity extends Activity implements LocationListener {
         nearestRouteIndex = 0;
         navigationActive = true;
         followLocation = true;
+        lastNavLocation = null;
+        lastCourseDegrees = Float.NaN;
+        locateButton.setVisibility(View.GONE);
 
         preTopBar.setVisibility(View.GONE);
         preTripPanel.setVisibility(View.GONE);
