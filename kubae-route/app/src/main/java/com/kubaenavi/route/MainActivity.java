@@ -39,7 +39,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -49,7 +51,9 @@ public class MainActivity extends Activity implements LocationListener {
 
     private static final int REQ_LOCATION = 201;
     private static final String ROUTE_URL = "https://valhalla1.openstreetmap.de/route";
+
     private static final int BLUE = 0xff1677ff;
+    private static final int NAVY = 0xff08275a;
     private static final int TEXT = 0xff17202a;
     private static final int SUB = 0xff65727e;
 
@@ -62,17 +66,34 @@ public class MainActivity extends Activity implements LocationListener {
     private Marker destinationMarker;
     private Polyline routeLine;
 
+    private LinearLayout preTripPanel;
+    private LinearLayout guidanceCard;
+    private LinearLayout bottomBar;
+    private TextView status;
+    private TextView summary;
+    private TextView turnArrow;
+    private TextView turnDistance;
+    private TextView turnInstruction;
+    private TextView nextTurn;
+    private TextView centerTurn;
+    private TextView etaText;
+    private TextView remainText;
+    private TextView progressText;
+
     private EditText destAddress;
     private EditText destLat;
     private EditText destLon;
-    private TextView status;
-    private TextView summary;
     private Button routeButton;
 
     private volatile boolean followLocation = true;
+    private volatile boolean navigationActive = false;
     private volatile double pendingDestLat = Double.NaN;
     private volatile double pendingDestLon = Double.NaN;
     private volatile String pendingDestAddress = "";
+
+    private RouteResult activeRoute;
+    private GeoPoint activeDestination;
+    private int nearestRouteIndex = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -85,6 +106,7 @@ public class MainActivity extends Activity implements LocationListener {
 
         map = new MapView(this);
         map.setTileSource(TileSourceFactory.MAPNIK);
+        map.setTilesScaledToDpi(true);
         map.setMultiTouchControls(true);
         map.getController().setZoom(17.0);
         map.getController().setCenter(new GeoPoint(37.5665, 126.9780));
@@ -92,44 +114,100 @@ public class MainActivity extends Activity implements LocationListener {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.VERTICAL);
-        top.setPadding(dp(14), dp(12), dp(14), dp(12));
-        top.setBackground(round(0xf7ffffff, 20, 1, 0xffe5eaf0));
-        top.setElevation(dp(5));
+        // 운행 전 상태바
+        LinearLayout preTop = new LinearLayout(this);
+        preTop.setOrientation(LinearLayout.VERTICAL);
+        preTop.setPadding(dp(14), dp(10), dp(14), dp(10));
+        preTop.setBackground(round(0xeeffffff, 18, 1, 0xffe5eaf0));
+        preTop.setElevation(dp(4));
 
-        TextView title = text("쿠배내비 · 짧은길 시험", 20, true, TEXT);
-        top.addView(title);
+        TextView title = text("쿠배내비 · 짧은길", 19, true, TEXT);
+        preTop.addView(title);
 
         status = text("현재 위치 확인 중", 13, true, BLUE);
-        status.setPadding(0, dp(4), 0, 0);
-        top.addView(status);
+        status.setPadding(0, dp(3), 0, 0);
+        preTop.addView(status);
 
-        summary = text("목적지를 입력하면 이륜차 후보 경로 중 이동거리가 가장 짧은 경로를 표시합니다.", 12, false, SUB);
-        summary.setPadding(0, dp(4), 0, 0);
-        top.addView(summary);
+        summary = text("목적지를 받으면 골목·이면도로 후보를 포함해 짧은 경로를 계산합니다.", 12, false, SUB);
+        summary.setPadding(0, dp(3), 0, 0);
+        preTop.addView(summary);
 
-        FrameLayout.LayoutParams topLp = new FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams preTopLp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT);
-        topLp.gravity = Gravity.TOP;
-        topLp.setMargins(dp(10), dp(10), dp(10), 0);
-        root.addView(top, topLp);
+        preTopLp.gravity = Gravity.TOP;
+        preTopLp.setMargins(dp(10), dp(10), dp(10), 0);
+        root.addView(preTop, preTopLp);
 
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(16), dp(14), dp(16), dp(16));
-        panel.setBackground(round(0xfaffffff, 22, 1, 0xffdfe5ec));
-        panel.setElevation(dp(8));
+        // 실제 운행 상단 턴 안내
+        guidanceCard = new LinearLayout(this);
+        guidanceCard.setOrientation(LinearLayout.VERTICAL);
+        guidanceCard.setPadding(dp(16), dp(12), dp(16), dp(12));
+        guidanceCard.setBackground(round(0xf808275a, 22, 0, 0));
+        guidanceCard.setElevation(dp(8));
+        guidanceCard.setVisibility(View.GONE);
+
+        LinearLayout mainTurnRow = new LinearLayout(this);
+        mainTurnRow.setOrientation(LinearLayout.HORIZONTAL);
+        mainTurnRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        turnArrow = text("↑", 54, true, Color.WHITE);
+        turnArrow.setGravity(Gravity.CENTER);
+        mainTurnRow.addView(turnArrow, new LinearLayout.LayoutParams(dp(92), dp(92)));
+
+        LinearLayout turnTextCol = new LinearLayout(this);
+        turnTextCol.setOrientation(LinearLayout.VERTICAL);
+        turnTextCol.setGravity(Gravity.CENTER_VERTICAL);
+
+        turnDistance = text("--m", 42, true, Color.WHITE);
+        turnInstruction = text("경로 안내 준비", 17, true, 0xffeef4ff);
+        turnInstruction.setMaxLines(2);
+        turnTextCol.addView(turnDistance);
+        turnTextCol.addView(turnInstruction);
+
+        mainTurnRow.addView(turnTextCol, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        guidanceCard.addView(mainTurnRow);
+
+        nextTurn = text("다음 안내 준비 중", 15, true, Color.WHITE);
+        nextTurn.setPadding(dp(12), dp(7), dp(12), dp(7));
+        nextTurn.setBackground(round(0x442b5fb4, 12, 0, 0));
+        guidanceCard.addView(nextTurn, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        FrameLayout.LayoutParams guideLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        guideLp.gravity = Gravity.TOP;
+        guideLp.setMargins(dp(10), dp(10), dp(10), 0);
+        root.addView(guidanceCard, guideLp);
+
+        // 회전 직전 중앙 강조
+        centerTurn = text("", 58, true, Color.WHITE);
+        centerTurn.setGravity(Gravity.CENTER);
+        centerTurn.setBackground(round(0xaa1d2b3a, 24, 0, 0));
+        centerTurn.setVisibility(View.GONE);
+        FrameLayout.LayoutParams centerLp = new FrameLayout.LayoutParams(dp(180), dp(150));
+        centerLp.gravity = Gravity.CENTER;
+        root.addView(centerTurn, centerLp);
+
+        // 운행 전 목적지 입력 패널
+        preTripPanel = new LinearLayout(this);
+        preTripPanel.setOrientation(LinearLayout.VERTICAL);
+        preTripPanel.setPadding(dp(16), dp(14), dp(16), dp(16));
+        preTripPanel.setBackground(round(0xfaffffff, 22, 1, 0xffdfe5ec));
+        preTripPanel.setElevation(dp(8));
 
         TextView panelTitle = text("목적지 주소 / 좌표", 17, true, TEXT);
-        panel.addView(panelTitle);
+        preTripPanel.addView(panelTitle);
 
-        destAddress = coordinateInput("목적지 주소 · 기존 짝꿍내비 전송값 테스트");
+        destAddress = coordinateInput("목적지 주소 · 짝꿍내비 전송값 테스트");
         LinearLayout.LayoutParams addressLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
         addressLp.topMargin = dp(8);
-        panel.addView(destAddress, addressLp);
+        preTripPanel.addView(destAddress, addressLp);
 
         LinearLayout inputRow = new LinearLayout(this);
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -149,32 +227,79 @@ public class MainActivity extends Activity implements LocationListener {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         inputRowLp.topMargin = dp(8);
-        panel.addView(inputRow, inputRowLp);
+        preTripPanel.addView(inputRow, inputRowLp);
 
         routeButton = button("쿠배형 짧은길 찾기", true);
         routeButton.setOnClickListener(v -> routeFromInputs());
-        panel.addView(routeButton);
+        preTripPanel.addView(routeButton);
 
-        Button followButton = button("현재 위치 자동추적 ON / OFF", false);
-        followButton.setOnClickListener(v -> {
-            followLocation = !followLocation;
-            Toast.makeText(this, followLocation ? "자동추적 ON" : "자동추적 OFF", Toast.LENGTH_SHORT).show();
-            if (followLocation && currentPoint != null) {
-                map.getController().animateTo(currentPoint);
-            }
-        });
-        panel.addView(followButton);
-
-        TextView warning = text("시험판: 실제 통행 가능 여부와 교통법규를 우선 확인하세요.", 11, false, 0xff7b8794);
+        TextView warning = text("시험판 · 실제 통행 가능 여부와 교통법규를 우선 확인하세요.", 11, false, 0xff7b8794);
         warning.setPadding(0, dp(7), 0, 0);
-        panel.addView(warning);
+        preTripPanel.addView(warning);
 
         FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT);
         panelLp.gravity = Gravity.BOTTOM;
         panelLp.setMargins(dp(10), 0, dp(10), dp(12));
-        root.addView(panel, panelLp);
+        root.addView(preTripPanel, panelLp);
+
+        // 운행 중 하단 ETA 바
+        bottomBar = new LinearLayout(this);
+        bottomBar.setOrientation(LinearLayout.VERTICAL);
+        bottomBar.setPadding(dp(18), dp(12), dp(18), dp(12));
+        bottomBar.setBackground(round(0xf7ffffff, 22, 1, 0xffe5eaf0));
+        bottomBar.setElevation(dp(8));
+        bottomBar.setVisibility(View.GONE);
+
+        LinearLayout etaRow = new LinearLayout(this);
+        etaRow.setOrientation(LinearLayout.HORIZONTAL);
+        etaRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        etaText = text("도착 --:--", 22, true, TEXT);
+        remainText = text("-- km", 22, true, TEXT);
+        etaRow.addView(etaText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        etaRow.addView(remainText);
+        bottomBar.addView(etaRow);
+
+        progressText = text("남은 시간 계산 중", 14, true, SUB);
+        progressText.setGravity(Gravity.CENTER);
+        progressText.setPadding(0, dp(4), 0, 0);
+        bottomBar.addView(progressText);
+
+        FrameLayout.LayoutParams bottomLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        bottomLp.gravity = Gravity.BOTTOM;
+        bottomLp.setMargins(dp(10), 0, dp(10), dp(12));
+        root.addView(bottomBar, bottomLp);
+
+        // 우측 현재위치 복귀 버튼
+        Button locateButton = new Button(this);
+        locateButton.setText("◎");
+        locateButton.setTextSize(28);
+        locateButton.setTextColor(TEXT);
+        locateButton.setAllCaps(false);
+        locateButton.setBackground(round(0xf7ffffff, 22, 1, 0xffe0e5eb));
+        locateButton.setStateListAnimator(null);
+        locateButton.setOnClickListener(v -> {
+            followLocation = true;
+            if (currentPoint != null) {
+                map.getController().animateTo(currentPoint);
+            }
+            toast("현재 위치 자동추적 ON");
+        });
+        FrameLayout.LayoutParams locateLp = new FrameLayout.LayoutParams(dp(62), dp(62));
+        locateLp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+        locateLp.setMargins(0, 0, dp(12), 0);
+        root.addView(locateButton, locateLp);
+
+        map.setOnTouchListener((v, event) -> {
+            if (navigationActive && event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
+                followLocation = false;
+            }
+            return false;
+        });
 
         setContentView(root);
 
@@ -242,11 +367,11 @@ public class MainActivity extends Activity implements LocationListener {
 
     private void startLocationUpdates() {
         try {
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 2f, this);
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 700L, 1.5f, this);
         } catch (Exception ignored) {
         }
         try {
-            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1500L, 3f, this);
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1300L, 3f, this);
         } catch (Exception ignored) {
         }
 
@@ -277,13 +402,101 @@ public class MainActivity extends Activity implements LocationListener {
         }
         currentMarker.setPosition(currentPoint);
 
-        status.setText(String.format(Locale.KOREA, "GPS 연결 · 정확도 약 %.0fm", location.getAccuracy()));
+        if (!navigationActive) {
+            status.setText(String.format(Locale.KOREA, "GPS 연결 · 정확도 약 %.0fm", location.getAccuracy()));
+        }
 
-        if (followLocation) {
+        if (navigationActive) {
+            updateNavigation(location);
+        } else if (followLocation) {
             map.getController().animateTo(currentPoint);
         }
+
         map.invalidate();
         maybeAutoRoute();
+    }
+
+    private void updateNavigation(Location location) {
+        if (activeRoute == null || activeRoute.points.isEmpty()) return;
+
+        nearestRouteIndex = findNearestRouteIndex(currentPoint, activeRoute.points, nearestRouteIndex);
+
+        if (followLocation) {
+            if (location.hasBearing() && location.getSpeed() > 1.2f) {
+                map.setMapOrientation(-location.getBearing());
+            }
+            map.getController().animateTo(currentPoint);
+        }
+
+        double remainingMeters = distanceAlong(activeRoute.points, nearestRouteIndex, activeRoute.points.size() - 1);
+        Maneuver next = null;
+        Maneuver after = null;
+
+        for (Maneuver m : activeRoute.maneuvers) {
+            if (m.beginShapeIndex > nearestRouteIndex + 1) {
+                if (next == null) next = m;
+                else {
+                    after = m;
+                    break;
+                }
+            }
+        }
+
+        if (next == null) {
+            turnArrow.setText("◎");
+            turnDistance.setText(formatDistance(remainingMeters));
+            turnInstruction.setText("목적지에 접근 중");
+            nextTurn.setText("안전하게 목적지를 확인하세요.");
+            centerTurn.setVisibility(View.GONE);
+        } else {
+            double nextMeters = distanceAlong(activeRoute.points,
+                    nearestRouteIndex,
+                    Math.min(next.beginShapeIndex, activeRoute.points.size() - 1));
+
+            turnArrow.setText(arrowForType(next.type));
+            turnDistance.setText(formatDistance(nextMeters));
+            turnInstruction.setText(cleanInstruction(next.instruction));
+            nextTurn.setText(after == null
+                    ? "다음 안내 · 목적지"
+                    : "다음 " + arrowForType(after.type) + "  " + cleanInstruction(after.instruction));
+
+            if (nextMeters <= 80.0) {
+                centerTurn.setText(arrowForType(next.type) + "\n" + formatDistance(nextMeters));
+                centerTurn.setVisibility(View.VISIBLE);
+            } else {
+                centerTurn.setVisibility(View.GONE);
+            }
+
+            if (followLocation) {
+                double targetZoom;
+                if (nextMeters <= 25) targetZoom = 19.5;
+                else if (nextMeters <= 60) targetZoom = 19.0;
+                else if (nextMeters <= 120) targetZoom = 18.5;
+                else if (nextMeters <= 250) targetZoom = 18.0;
+                else if (location.getSpeed() >= 12f) targetZoom = 16.8;
+                else if (location.getSpeed() >= 6f) targetZoom = 17.2;
+                else targetZoom = 17.7;
+                map.getController().setZoom(targetZoom);
+            }
+        }
+
+        double remainKm = Math.max(0.0, remainingMeters / 1000.0);
+        double fraction = activeRoute.lengthKm > 0.01
+                ? Math.max(0.0, Math.min(1.0, remainKm / activeRoute.lengthKm))
+                : 0.0;
+        long remainSeconds = Math.max(20L, Math.round(activeRoute.timeSeconds * fraction));
+        long arrivalMillis = System.currentTimeMillis() + remainSeconds * 1000L;
+        String arrival = new SimpleDateFormat("a h:mm", Locale.KOREA).format(new Date(arrivalMillis));
+
+        etaText.setText("도착 " + arrival);
+        remainText.setText(String.format(Locale.KOREA, "%.1f km", remainKm));
+        progressText.setText(Math.max(1, Math.round(remainSeconds / 60.0)) + "분 남음");
+
+        if (remainingMeters < 20.0) {
+            turnInstruction.setText("목적지 도착");
+            turnDistance.setText("도착");
+            centerTurn.setVisibility(View.GONE);
+        }
     }
 
     private void maybeAutoRoute() {
@@ -330,7 +543,7 @@ public class MainActivity extends Activity implements LocationListener {
 
         routeButton.setEnabled(false);
         status.setText("목적지 주소 좌표 확인 중…");
-        summary.setText("기존 짝꿍내비처럼 목적지 주소를 받아 쿠배내비 경로로 변환합니다.");
+        summary.setText("짝꿍내비 목적지 주소를 쿠배내비 경로로 변환합니다.");
 
         final String clean = address.trim();
         executor.execute(() -> {
@@ -371,7 +584,7 @@ public class MainActivity extends Activity implements LocationListener {
 
         routeButton.setEnabled(false);
         status.setText("이륜차 후보 경로 3개 계산 중…");
-        summary.setText("대도로 선호도를 다르게 계산한 뒤 실제 이동거리가 가장 짧은 경로를 선택합니다.");
+        summary.setText("골목·이면도로를 포함한 후보 중 이동거리가 가장 짧은 경로를 고릅니다.");
 
         final GeoPoint start = new GeoPoint(currentPoint.getLatitude(), currentPoint.getLongitude());
         final GeoPoint dest = new GeoPoint(lat, lon);
@@ -449,9 +662,7 @@ public class MainActivity extends Activity implements LocationListener {
         String response = readAll(stream);
         conn.disconnect();
 
-        if (code < 200 || code >= 300) {
-            return null;
-        }
+        if (code < 200 || code >= 300) return null;
 
         JSONObject json = new JSONObject(response);
         JSONObject trip = json.getJSONObject("trip");
@@ -459,11 +670,27 @@ public class MainActivity extends Activity implements LocationListener {
         JSONArray legs = trip.getJSONArray("legs");
         if (legs.length() == 0) return null;
 
-        String shape = legs.getJSONObject(0).getString("shape");
+        JSONObject leg = legs.getJSONObject(0);
+        String shape = leg.getString("shape");
         List<GeoPoint> points = decodePolyline6(shape);
+
+        List<Maneuver> maneuvers = new ArrayList<>();
+        JSONArray ms = leg.optJSONArray("maneuvers");
+        if (ms != null) {
+            for (int i = 0; i < ms.length(); i++) {
+                JSONObject m = ms.getJSONObject(i);
+                Maneuver man = new Maneuver();
+                man.type = m.optInt("type", 0);
+                man.instruction = m.optString("instruction", "");
+                man.beginShapeIndex = m.optInt("begin_shape_index", 0);
+                man.endShapeIndex = m.optInt("end_shape_index", man.beginShapeIndex);
+                maneuvers.add(man);
+            }
+        }
 
         RouteResult r = new RouteResult();
         r.points = points;
+        r.maneuvers = maneuvers;
         r.lengthKm = tripSummary.optDouble("length", Double.MAX_VALUE);
         r.timeSeconds = tripSummary.optDouble("time", 0);
         r.usePrimary = usePrimary;
@@ -471,17 +698,13 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void drawRoute(RouteResult result, GeoPoint destination) {
-        if (routeLine != null) {
-            map.getOverlays().remove(routeLine);
-        }
-        if (destinationMarker != null) {
-            map.getOverlays().remove(destinationMarker);
-        }
+        if (routeLine != null) map.getOverlays().remove(routeLine);
+        if (destinationMarker != null) map.getOverlays().remove(destinationMarker);
 
         routeLine = new Polyline(map);
         routeLine.setPoints(result.points);
         routeLine.setColor(BLUE);
-        routeLine.setWidth(dp(6));
+        routeLine.setWidth(dp(8));
         map.getOverlays().add(routeLine);
 
         destinationMarker = new Marker(map);
@@ -491,17 +714,87 @@ public class MainActivity extends Activity implements LocationListener {
         destinationMarker.setIcon(getDrawable(android.R.drawable.ic_menu_mylocation));
         map.getOverlays().add(destinationMarker);
 
-        status.setText("쿠배형 짧은길 표시 완료");
-        int mins = (int) Math.max(1, Math.round(result.timeSeconds / 60.0));
-        summary.setText(String.format(Locale.KOREA,
-                "후보 3개 중 최단 %.2f km · 예상 %d분 · 대도로 선호 %.0f%%",
-                result.lengthKm, mins, result.usePrimary * 100.0));
+        activeRoute = result;
+        activeDestination = destination;
+        nearestRouteIndex = 0;
+        navigationActive = true;
+        followLocation = true;
+
+        preTripPanel.setVisibility(View.GONE);
+        status.setVisibility(View.GONE);
+        summary.setVisibility(View.GONE);
+        guidanceCard.setVisibility(View.VISIBLE);
+        bottomBar.setVisibility(View.VISIBLE);
 
         if (!result.points.isEmpty()) {
-            org.osmdroid.util.BoundingBox box = org.osmdroid.util.BoundingBox.fromGeoPoints(result.points);
-            map.zoomToBoundingBox(box, true, dp(90));
+            map.getController().setZoom(17.7);
+            map.getController().animateTo(currentPoint != null ? currentPoint : result.points.get(0));
         }
+
+        turnInstruction.setText("출발하세요");
+        turnDistance.setText("출발");
+        nextTurn.setText("경로 안내를 시작합니다.");
         map.invalidate();
+    }
+
+    private int findNearestRouteIndex(GeoPoint p, List<GeoPoint> pts, int hint) {
+        if (p == null || pts == null || pts.isEmpty()) return 0;
+        int start = Math.max(0, hint - 25);
+        int end = Math.min(pts.size() - 1, hint + 160);
+
+        double best = Double.MAX_VALUE;
+        int bestIdx = hint;
+
+        for (int i = start; i <= end; i++) {
+            double d = straightDistanceMeters(p, pts.get(i));
+            if (d < best) {
+                best = d;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
+    private double distanceAlong(List<GeoPoint> pts, int start, int end) {
+        if (pts == null || pts.size() < 2) return 0.0;
+        int a = Math.max(0, Math.min(start, pts.size() - 1));
+        int b = Math.max(0, Math.min(end, pts.size() - 1));
+        if (b <= a) return 0.0;
+
+        double total = 0.0;
+        for (int i = a; i < b; i++) {
+            total += straightDistanceMeters(pts.get(i), pts.get(i + 1));
+        }
+        return total;
+    }
+
+    private static double straightDistanceMeters(GeoPoint a, GeoPoint b) {
+        float[] r = new float[1];
+        Location.distanceBetween(
+                a.getLatitude(), a.getLongitude(),
+                b.getLatitude(), b.getLongitude(), r);
+        return r[0];
+    }
+
+    private String arrowForType(int type) {
+        if (type == 9 || type == 10 || type == 11 || type == 18 || type == 20 || type == 23) return "↱";
+        if (type == 14 || type == 15 || type == 16 || type == 19 || type == 21 || type == 24) return "↰";
+        if (type == 12 || type == 13) return "↶";
+        if (type == 26 || type == 27) return "⟳";
+        if (type == 4 || type == 5 || type == 6) return "◎";
+        return "↑";
+    }
+
+    private String formatDistance(double meters) {
+        if (meters < 1000.0) return Math.max(1, Math.round(meters)) + "m";
+        return String.format(Locale.KOREA, "%.1fkm", meters / 1000.0);
+    }
+
+    private String cleanInstruction(String s) {
+        if (s == null || s.trim().isEmpty()) return "계속 진행";
+        String t = s.trim();
+        if (t.length() > 44) t = t.substring(0, 44);
+        return t;
     }
 
     private static List<GeoPoint> decodePolyline6(String encoded) {
@@ -635,8 +928,16 @@ public class MainActivity extends Activity implements LocationListener {
         super.onDestroy();
     }
 
+    private static class Maneuver {
+        int type;
+        String instruction = "";
+        int beginShapeIndex;
+        int endShapeIndex;
+    }
+
     private static class RouteResult {
         List<GeoPoint> points = new ArrayList<>();
+        List<Maneuver> maneuvers = new ArrayList<>();
         double lengthKm;
         double timeSeconds;
         double usePrimary;
