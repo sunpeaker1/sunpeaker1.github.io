@@ -66,6 +66,7 @@ public class MainActivity extends Activity implements LocationListener {
     private Marker destinationMarker;
     private Polyline routeLine;
 
+    private LinearLayout preTopBar;
     private LinearLayout preTripPanel;
     private LinearLayout guidanceCard;
     private LinearLayout bottomBar;
@@ -115,7 +116,8 @@ public class MainActivity extends Activity implements LocationListener {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         // 운행 전 상태바
-        LinearLayout preTop = new LinearLayout(this);
+        preTopBar = new LinearLayout(this);
+        LinearLayout preTop = preTopBar;
         preTop.setOrientation(LinearLayout.VERTICAL);
         preTop.setPadding(dp(14), dp(10), dp(14), dp(10));
         preTop.setBackground(round(0xeeffffff, 18, 1, 0xffe5eaf0));
@@ -720,9 +722,8 @@ public class MainActivity extends Activity implements LocationListener {
         navigationActive = true;
         followLocation = true;
 
+        preTopBar.setVisibility(View.GONE);
         preTripPanel.setVisibility(View.GONE);
-        status.setVisibility(View.GONE);
-        summary.setVisibility(View.GONE);
         guidanceCard.setVisibility(View.VISIBLE);
         bottomBar.setVisibility(View.VISIBLE);
 
