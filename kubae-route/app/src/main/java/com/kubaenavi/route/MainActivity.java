@@ -9,6 +9,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.location.Address;
 import android.location.Geocoder;
+import android.hardware.GeomagneticField;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -31,6 +32,9 @@ import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polyline;
+import org.osmdroid.views.overlay.compass.IOrientationConsumer;
+import org.osmdroid.views.overlay.compass.IOrientationProvider;
+import org.osmdroid.views.overlay.compass.InternalCompassOrientationProvider;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -47,7 +51,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends Activity implements LocationListener {
+public class MainActivity extends Activity implements LocationListener, IOrientationConsumer {
 
     private static final int REQ_LOCATION = 201;
     private static final String ROUTE_URL = "https://valhalla1.openstreetmap.de/route";
@@ -88,7 +92,10 @@ public class MainActivity extends Activity implements LocationListener {
     private Button locateButton;
 
     private Location lastNavLocation;
+    private Location latestLocation;
     private float lastCourseDegrees = Float.NaN;
+    private float compassTrueHeading = Float.NaN;
+    private IOrientationProvider compassProvider;
 
     private volatile boolean followLocation = true;
     private volatile boolean navigationActive = false;
@@ -293,10 +300,12 @@ public class MainActivity extends Activity implements LocationListener {
         locateButton.setOnClickListener(v -> {
             followLocation = true;
             locateButton.setVisibility(View.GONE);
-            if (currentPoint != null) {
+            if (latestLocation != null) {
+                applyHeadingUp(latestLocation);
+                moveNavigationCamera(latestLocation, lastCourseDegrees);
+            } else if (currentPoint != null) {
                 map.getController().animateTo(currentPoint);
             }
-            applyHeadingUp(lastNavLocation);
         });
         FrameLayout.LayoutParams locateLp = new FrameLayout.LayoutParams(dp(190), dp(58));
         locateLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
@@ -314,6 +323,7 @@ public class MainActivity extends Activity implements LocationListener {
         setContentView(root);
 
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        compassProvider = new InternalCompassOrientationProvider(this);
         requestLocationIfNeeded();
         handleIncomingIntent(getIntent());
     }
@@ -401,6 +411,7 @@ public class MainActivity extends Activity implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
+        latestLocation = new Location(location);
         currentPoint = new GeoPoint(location.getLatitude(), location.getLongitude());
 
         if (currentMarker == null) {
@@ -434,7 +445,7 @@ public class MainActivity extends Activity implements LocationListener {
         if (followLocation) {
             locateButton.setVisibility(View.GONE);
             applyHeadingUp(location);
-            map.getController().animateTo(currentPoint);
+            moveNavigationCamera(location, lastCourseDegrees);
         }
         rememberNavigationLocation(location);
 
@@ -536,6 +547,10 @@ public class MainActivity extends Activity implements LocationListener {
             }
         }
 
+        if (!Float.isNaN(compassTrueHeading) && location.getSpeed() < 2.0f) {
+            return normalizeDegrees(compassTrueHeading);
+        }
+
         Float routeCourse = routeCourseDegrees();
         if (routeCourse != null) return routeCourse;
 
@@ -585,6 +600,71 @@ public class MainActivity extends Activity implements LocationListener {
 
         // 급격한 GPS 튐을 완화하되 골목 회전은 따라갈 수 있게 45% 반영.
         return normalizeDegrees(previous + delta * 0.45f);
+    }
+
+    @Override
+    public void onOrientationChanged(float orientationToMagneticNorth, IOrientationProvider source) {
+        if (latestLocation != null) {
+            GeomagneticField gf = new GeomagneticField(
+                    (float) latestLocation.getLatitude(),
+                    (float) latestLocation.getLongitude(),
+                    (float) latestLocation.getAltitude(),
+                    latestLocation.getTime() > 0 ? latestLocation.getTime() : System.currentTimeMillis());
+            compassTrueHeading = normalizeDegrees(orientationToMagneticNorth + gf.getDeclination());
+        } else {
+            compassTrueHeading = normalizeDegrees(orientationToMagneticNorth);
+        }
+
+        if (navigationActive && followLocation && latestLocation != null && latestLocation.getSpeed() < 2.0f) {
+            float smoothed = smoothCourse(lastCourseDegrees, compassTrueHeading);
+            lastCourseDegrees = smoothed;
+            float orientation = normalizeDegrees(360f - smoothed);
+            map.setMapOrientation(orientation, true);
+            moveNavigationCamera(latestLocation, smoothed);
+        }
+    }
+
+    private void moveNavigationCamera(Location location, float headingDegrees) {
+        if (!navigationActive || !followLocation || location == null) return;
+
+        float heading = headingDegrees;
+        if (Float.isNaN(heading)) {
+            Float routeHeading = routeCourseDegrees();
+            if (routeHeading != null) heading = routeHeading;
+        }
+
+        if (Float.isNaN(heading)) {
+            map.getController().animateTo(currentPoint);
+            return;
+        }
+
+        double speedKmh = Math.max(0.0, location.getSpeed() * 3.6);
+        double lookAheadMeters;
+        if (speedKmh >= 45.0) lookAheadMeters = 140.0;
+        else if (speedKmh >= 25.0) lookAheadMeters = 105.0;
+        else if (speedKmh >= 10.0) lookAheadMeters = 75.0;
+        else lookAheadMeters = 45.0;
+
+        GeoPoint cameraCenter = destinationPoint(
+                location.getLatitude(), location.getLongitude(), heading, lookAheadMeters);
+        map.getController().animateTo(cameraCenter);
+    }
+
+    private static GeoPoint destinationPoint(double latDeg, double lonDeg, double bearingDeg, double distanceMeters) {
+        final double earth = 6371000.0;
+        double angular = distanceMeters / earth;
+        double bearing = Math.toRadians(bearingDeg);
+        double lat1 = Math.toRadians(latDeg);
+        double lon1 = Math.toRadians(lonDeg);
+
+        double lat2 = Math.asin(
+                Math.sin(lat1) * Math.cos(angular)
+                        + Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing));
+        double lon2 = lon1 + Math.atan2(
+                Math.sin(bearing) * Math.sin(angular) * Math.cos(lat1),
+                Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2));
+
+        return new GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2));
     }
 
     private void maybeAutoRoute() {
@@ -822,7 +902,10 @@ public class MainActivity extends Activity implements LocationListener {
             Float initialCourse = routeCourseDegrees();
             if (initialCourse != null) {
                 lastCourseDegrees = initialCourse;
-                map.setMapOrientation((360f - initialCourse) % 360f, true);
+                map.setMapOrientation(normalizeDegrees(360f - initialCourse), true);
+                if (latestLocation != null) {
+                    moveNavigationCamera(latestLocation, initialCourse);
+                }
             }
         }
 
@@ -1005,10 +1088,16 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onResume() {
         super.onResume();
         if (map != null) map.onResume();
+        if (compassProvider != null) {
+            compassProvider.startOrientationProvider(this);
+        }
     }
 
     @Override
     protected void onPause() {
+        if (compassProvider != null) {
+            compassProvider.stopOrientationProvider();
+        }
         if (map != null) map.onPause();
         super.onPause();
     }
@@ -1017,6 +1106,13 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onDestroy() {
         try {
             if (locationManager != null) locationManager.removeUpdates(this);
+        } catch (Exception ignored) {
+        }
+        try {
+            if (compassProvider != null) {
+                compassProvider.stopOrientationProvider();
+                compassProvider.destroy();
+            }
         } catch (Exception ignored) {
         }
         executor.shutdownNow();
