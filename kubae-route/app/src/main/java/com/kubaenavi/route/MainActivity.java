@@ -85,6 +85,7 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
     private TextView remainText;
     private TextView progressText;
     private TextView navPositionIndicator;
+    private TextView diagnosticText;
 
     private EditText destAddress;
     private EditText destLat;
@@ -96,6 +97,8 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
     private Location latestLocation;
     private float lastCourseDegrees = Float.NaN;
     private float compassTrueHeading = Float.NaN;
+    private float selectedHeadingDegrees = Float.NaN;
+    private String selectedHeadingSource = "NONE";
     private IOrientationProvider compassProvider;
 
     private volatile boolean followLocation = true;
@@ -137,6 +140,18 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         navIndicatorLp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
         navIndicatorLp.setMargins(0, 0, 0, dp(250));
         root.addView(navPositionIndicator, navIndicatorLp);
+        diagnosticText = text("회전 진단 대기", 12, true, Color.WHITE);
+        diagnosticText.setPadding(dp(10), dp(8), dp(10), dp(8));
+        diagnosticText.setBackground(round(0xdd000000, 10, 0, 0));
+        diagnosticText.setLineSpacing(0f, 1.15f);
+        diagnosticText.setVisibility(View.GONE);
+        diagnosticText.setElevation(dp(15));
+
+        FrameLayout.LayoutParams diagLp = new FrameLayout.LayoutParams(
+                dp(270), LinearLayout.LayoutParams.WRAP_CONTENT);
+        diagLp.gravity = Gravity.START | Gravity.BOTTOM;
+        diagLp.setMargins(dp(10), 0, 0, dp(125));
+        root.addView(diagnosticText, diagLp);
 
         // 운행 전 상태바
         preTopBar = new LinearLayout(this);
@@ -445,6 +460,9 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
             map.getController().animateTo(currentPoint);
         }
 
+        if (navigationActive) {
+            updateDiagnostic(location);
+        }
         map.invalidate();
         maybeAutoRoute();
     }
@@ -540,6 +558,7 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
 
         float smoothed = smoothCourse(lastCourseDegrees, course);
         lastCourseDegrees = smoothed;
+        selectedHeadingDegrees = smoothed;
 
         // 내부 osmdroid 회전 대신 MapView 자체를 실제 화면에서 회전시킨다.
         // 주행방향이 위쪽을 향하도록 지도는 반대 각도로 회전.
@@ -553,30 +572,39 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         float current = map.getRotation();
         float delta = normalizeSignedDegrees(targetRotation - current);
         map.setRotation(current + delta * 0.55f);
+        updateDiagnostic(location);
     }
 
     private Float resolveCourseDegrees(Location location) {
         if (location.hasBearing() && location.getSpeed() >= 0.7f) {
+            selectedHeadingSource = "GPS_BEARING";
             return normalizeDegrees(location.getBearing());
         }
 
         if (lastNavLocation != null) {
             float moved = lastNavLocation.distanceTo(location);
             if (moved >= 2.5f) {
+                selectedHeadingSource = "MOVE_VECTOR";
                 return normalizeDegrees(lastNavLocation.bearingTo(location));
             }
         }
 
         if (!Float.isNaN(compassTrueHeading) && location.getSpeed() < 2.0f) {
+            selectedHeadingSource = "COMPASS";
             return normalizeDegrees(compassTrueHeading);
         }
 
         Float routeCourse = routeCourseDegrees();
-        if (routeCourse != null) return routeCourse;
+        if (routeCourse != null) {
+            selectedHeadingSource = "ROUTE";
+            return routeCourse;
+        }
 
         if (!Float.isNaN(lastCourseDegrees)) {
+            selectedHeadingSource = "LAST";
             return lastCourseDegrees;
         }
+        selectedHeadingSource = "NONE";
         return null;
     }
 
@@ -645,6 +673,8 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         if (navigationActive && followLocation && latestLocation != null && latestLocation.getSpeed() < 2.0f) {
             float smoothed = smoothCourse(lastCourseDegrees, compassTrueHeading);
             lastCourseDegrees = smoothed;
+            selectedHeadingDegrees = smoothed;
+            selectedHeadingSource = "COMPASS_DIRECT";
             map.setMapOrientation(0f, false);
             map.setScaleX(1.42f);
             map.setScaleY(1.42f);
@@ -653,6 +683,7 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
             float delta = normalizeSignedDegrees(targetRotation - current);
             map.setRotation(current + delta * 0.55f);
             moveNavigationCamera(latestLocation, smoothed);
+            updateDiagnostic(latestLocation);
         }
     }
 
@@ -697,6 +728,42 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
                 Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2));
 
         return new GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2));
+    }
+
+    private void updateDiagnostic(Location location) {
+        if (diagnosticText == null) return;
+
+        String gps = "--";
+        String speed = "--";
+        if (location != null) {
+            gps = location.hasBearing()
+                    ? String.format(Locale.US, "%.1f°", normalizeDegrees(location.getBearing()))
+                    : "--";
+            speed = String.format(Locale.US, "%.1f km/h", Math.max(0f, location.getSpeed() * 3.6f));
+        }
+
+        String compass = Float.isNaN(compassTrueHeading)
+                ? "--"
+                : String.format(Locale.US, "%.1f°", compassTrueHeading);
+
+        Float route = routeCourseDegrees();
+        String routeText = route == null
+                ? "--"
+                : String.format(Locale.US, "%.1f°", route);
+
+        String selected = Float.isNaN(selectedHeadingDegrees)
+                ? "--"
+                : String.format(Locale.US, "%.1f°", selectedHeadingDegrees);
+
+        String rotation = String.format(Locale.US, "%.1f°", map.getRotation());
+
+        diagnosticText.setText(
+                "회전 진단 V0.3.4\n" +
+                "GPS bearing  " + gps + "  / " + speed + "\n" +
+                "Compass      " + compass + "\n" +
+                "Route        " + routeText + "\n" +
+                "Selected     " + selected + " [" + selectedHeadingSource + "]\n" +
+                "Map rotation " + rotation);
     }
 
     private void maybeAutoRoute() {
@@ -923,6 +990,9 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         lastCourseDegrees = Float.NaN;
         locateButton.setVisibility(View.GONE);
         navPositionIndicator.setVisibility(View.VISIBLE);
+        diagnosticText.setVisibility(View.VISIBLE);
+        selectedHeadingDegrees = Float.NaN;
+        selectedHeadingSource = "ROUTE_START";
         if (currentMarker != null) currentMarker.setEnabled(false);
 
         preTopBar.setVisibility(View.GONE);
@@ -936,6 +1006,8 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
             Float initialCourse = routeCourseDegrees();
             if (initialCourse != null) {
                 lastCourseDegrees = initialCourse;
+                selectedHeadingDegrees = initialCourse;
+                selectedHeadingSource = "ROUTE_START";
                 map.setMapOrientation(0f, false);
                 map.setScaleX(1.42f);
                 map.setScaleY(1.42f);
@@ -949,6 +1021,7 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         turnInstruction.setText("출발하세요");
         turnDistance.setText("출발");
         nextTurn.setText("경로 안내를 시작합니다.");
+        updateDiagnostic(latestLocation);
         map.invalidate();
     }
 
