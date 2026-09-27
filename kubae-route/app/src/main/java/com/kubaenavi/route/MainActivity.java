@@ -84,6 +84,7 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
     private TextView etaText;
     private TextView remainText;
     private TextView progressText;
+    private TextView navPositionIndicator;
 
     private EditText destAddress;
     private EditText destLat;
@@ -125,6 +126,17 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         root.addView(map, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+        // 카카오내비처럼 지도와 분리된 고정 현재위치 표시
+        navPositionIndicator = text("▲", 30, true, Color.WHITE);
+        navPositionIndicator.setGravity(Gravity.CENTER);
+        navPositionIndicator.setBackground(round(0xff1677ff, 40, 3, Color.WHITE));
+        navPositionIndicator.setElevation(dp(12));
+        navPositionIndicator.setVisibility(View.GONE);
+
+        FrameLayout.LayoutParams navIndicatorLp = new FrameLayout.LayoutParams(dp(58), dp(58));
+        navIndicatorLp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
+        navIndicatorLp.setMargins(0, 0, 0, dp(250));
+        root.addView(navPositionIndicator, navIndicatorLp);
 
         // 운행 전 상태바
         preTopBar = new LinearLayout(this);
@@ -529,10 +541,18 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         float smoothed = smoothCourse(lastCourseDegrees, course);
         lastCourseDegrees = smoothed;
 
-        // osmdroid 공식 heading-up 방식: 진행방향이 화면 위를 향하도록 360 - bearing.
-        float orientation = (360f - smoothed) % 360f;
-        if (orientation < 0f) orientation += 360f;
-        map.setMapOrientation(orientation, true);
+        // 내부 osmdroid 회전 대신 MapView 자체를 실제 화면에서 회전시킨다.
+        // 주행방향이 위쪽을 향하도록 지도는 반대 각도로 회전.
+        map.setMapOrientation(0f, false);
+        float targetRotation = -smoothed;
+
+        // 회전 시 화면 모서리가 비지 않도록 지도를 약간 확장.
+        map.setScaleX(1.42f);
+        map.setScaleY(1.42f);
+
+        float current = map.getRotation();
+        float delta = normalizeSignedDegrees(targetRotation - current);
+        map.setRotation(current + delta * 0.55f);
     }
 
     private Float resolveCourseDegrees(Location location) {
@@ -592,6 +612,13 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         return d;
     }
 
+    private static float normalizeSignedDegrees(float degrees) {
+        float d = degrees % 360f;
+        if (d > 180f) d -= 360f;
+        if (d < -180f) d += 360f;
+        return d;
+    }
+
     private static float smoothCourse(float previous, float current) {
         if (Float.isNaN(previous)) return normalizeDegrees(current);
 
@@ -618,8 +645,13 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         if (navigationActive && followLocation && latestLocation != null && latestLocation.getSpeed() < 2.0f) {
             float smoothed = smoothCourse(lastCourseDegrees, compassTrueHeading);
             lastCourseDegrees = smoothed;
-            float orientation = normalizeDegrees(360f - smoothed);
-            map.setMapOrientation(orientation, true);
+            map.setMapOrientation(0f, false);
+            map.setScaleX(1.42f);
+            map.setScaleY(1.42f);
+            float targetRotation = -smoothed;
+            float current = map.getRotation();
+            float delta = normalizeSignedDegrees(targetRotation - current);
+            map.setRotation(current + delta * 0.55f);
             moveNavigationCamera(latestLocation, smoothed);
         }
     }
@@ -890,6 +922,8 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
         lastNavLocation = null;
         lastCourseDegrees = Float.NaN;
         locateButton.setVisibility(View.GONE);
+        navPositionIndicator.setVisibility(View.VISIBLE);
+        if (currentMarker != null) currentMarker.setEnabled(false);
 
         preTopBar.setVisibility(View.GONE);
         preTripPanel.setVisibility(View.GONE);
@@ -902,7 +936,10 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
             Float initialCourse = routeCourseDegrees();
             if (initialCourse != null) {
                 lastCourseDegrees = initialCourse;
-                map.setMapOrientation(normalizeDegrees(360f - initialCourse), true);
+                map.setMapOrientation(0f, false);
+                map.setScaleX(1.42f);
+                map.setScaleY(1.42f);
+                map.setRotation(-initialCourse);
                 if (latestLocation != null) {
                     moveNavigationCamera(latestLocation, initialCourse);
                 }
@@ -1087,7 +1124,14 @@ public class MainActivity extends Activity implements LocationListener, IOrienta
     @Override
     protected void onResume() {
         super.onResume();
-        if (map != null) map.onResume();
+        if (map != null) {
+            map.onResume();
+            if (!navigationActive) {
+                map.setRotation(0f);
+                map.setScaleX(1f);
+                map.setScaleY(1f);
+            }
+        }
         if (compassProvider != null) {
             compassProvider.startOrientationProvider(this);
         }
