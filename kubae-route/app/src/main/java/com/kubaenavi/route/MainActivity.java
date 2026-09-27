@@ -7,6 +7,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.location.Address;
+import android.location.Geocoder;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -60,6 +62,7 @@ public class MainActivity extends Activity implements LocationListener {
     private Marker destinationMarker;
     private Polyline routeLine;
 
+    private EditText destAddress;
     private EditText destLat;
     private EditText destLon;
     private TextView status;
@@ -69,6 +72,7 @@ public class MainActivity extends Activity implements LocationListener {
     private volatile boolean followLocation = true;
     private volatile double pendingDestLat = Double.NaN;
     private volatile double pendingDestLon = Double.NaN;
+    private volatile String pendingDestAddress = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -118,8 +122,14 @@ public class MainActivity extends Activity implements LocationListener {
         panel.setBackground(round(0xfaffffff, 22, 1, 0xffdfe5ec));
         panel.setElevation(dp(8));
 
-        TextView panelTitle = text("목적지 좌표", 17, true, TEXT);
+        TextView panelTitle = text("목적지 주소 / 좌표", 17, true, TEXT);
         panel.addView(panelTitle);
+
+        destAddress = coordinateInput("목적지 주소 · 기존 짝꿍내비 전송값 테스트");
+        LinearLayout.LayoutParams addressLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
+        addressLp.topMargin = dp(8);
+        panel.addView(destAddress, addressLp);
 
         LinearLayout inputRow = new LinearLayout(this);
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -183,17 +193,29 @@ public class MainActivity extends Activity implements LocationListener {
     private void handleIncomingIntent(Intent intent) {
         if (intent == null) return;
 
+        String address = intent.getStringExtra("dest_address");
         double lat = intent.getDoubleExtra("dest_lat", Double.NaN);
         double lon = intent.getDoubleExtra("dest_lon", Double.NaN);
 
         Uri data = intent.getData();
-        if ((Double.isNaN(lat) || Double.isNaN(lon)) && data != null &&
-                "kubaenavi".equalsIgnoreCase(data.getScheme())) {
-            try {
-                lat = Double.parseDouble(data.getQueryParameter("lat"));
-                lon = Double.parseDouble(data.getQueryParameter("lon"));
-            } catch (Exception ignored) {
+        if (data != null && "kubaenavi".equalsIgnoreCase(data.getScheme())) {
+            if (address == null || address.trim().isEmpty()) {
+                address = data.getQueryParameter("address");
             }
+            if (Double.isNaN(lat) || Double.isNaN(lon)) {
+                try {
+                    lat = Double.parseDouble(data.getQueryParameter("lat"));
+                    lon = Double.parseDouble(data.getQueryParameter("lon"));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        if (address != null && !address.trim().isEmpty()) {
+            pendingDestAddress = address.trim();
+            if (destAddress != null) destAddress.setText(pendingDestAddress);
+            maybeAutoRoute();
+            return;
         }
 
         if (!Double.isNaN(lat) && !Double.isNaN(lon)) {
@@ -265,7 +287,16 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void maybeAutoRoute() {
-        if (currentPoint == null || Double.isNaN(pendingDestLat) || Double.isNaN(pendingDestLon)) return;
+        if (currentPoint == null) return;
+
+        if (pendingDestAddress != null && !pendingDestAddress.trim().isEmpty()) {
+            String address = pendingDestAddress.trim();
+            pendingDestAddress = "";
+            geocodeAndRoute(address);
+            return;
+        }
+
+        if (Double.isNaN(pendingDestLat) || Double.isNaN(pendingDestLon)) return;
         double lat = pendingDestLat;
         double lon = pendingDestLon;
         pendingDestLat = Double.NaN;
@@ -278,13 +309,61 @@ public class MainActivity extends Activity implements LocationListener {
             toast("현재 GPS 위치를 아직 확인하지 못했습니다.");
             return;
         }
+
+        String address = destAddress == null ? "" : destAddress.getText().toString().trim();
+        if (!address.isEmpty()) {
+            geocodeAndRoute(address);
+            return;
+        }
+
         try {
             double lat = Double.parseDouble(destLat.getText().toString().trim());
             double lon = Double.parseDouble(destLon.getText().toString().trim());
             calculateRoute(lat, lon);
         } catch (Exception e) {
-            toast("목적지 위도·경도를 확인하세요.");
+            toast("목적지 주소 또는 위도·경도를 확인하세요.");
         }
+    }
+
+    private void geocodeAndRoute(String address) {
+        if (currentPoint == null || address == null || address.trim().isEmpty()) return;
+
+        routeButton.setEnabled(false);
+        status.setText("목적지 주소 좌표 확인 중…");
+        summary.setText("기존 짝꿍내비처럼 목적지 주소를 받아 쿠배내비 경로로 변환합니다.");
+
+        final String clean = address.trim();
+        executor.execute(() -> {
+            try {
+                Geocoder geocoder = new Geocoder(MainActivity.this, Locale.KOREA);
+                List<Address> list = geocoder.getFromLocationName(clean, 5);
+                if (list == null || list.isEmpty()) {
+                    runOnUiThread(() -> {
+                        routeButton.setEnabled(true);
+                        status.setText("주소 변환 실패");
+                        summary.setText("주소를 좌표로 찾지 못했습니다. 좌표 입력으로도 시험할 수 있습니다.");
+                    });
+                    return;
+                }
+
+                Address best = list.get(0);
+                double lat = best.getLatitude();
+                double lon = best.getLongitude();
+
+                runOnUiThread(() -> {
+                    destLat.setText(String.format(Locale.US, "%.6f", lat));
+                    destLon.setText(String.format(Locale.US, "%.6f", lon));
+                    routeButton.setEnabled(true);
+                    calculateRoute(lat, lon);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    routeButton.setEnabled(true);
+                    status.setText("주소 변환 오류");
+                    summary.setText("휴대폰 주소 검색 서비스 또는 네트워크를 확인하세요.");
+                });
+            }
+        });
     }
 
     private void calculateRoute(double lat, double lon) {
