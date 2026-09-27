@@ -536,8 +536,30 @@ public class MainActivity extends Activity implements LocationListener {
             }
         }
 
+        Float routeCourse = routeCourseDegrees();
+        if (routeCourse != null) return routeCourse;
+
         if (!Float.isNaN(lastCourseDegrees)) {
             return lastCourseDegrees;
+        }
+        return null;
+    }
+
+    private Float routeCourseDegrees() {
+        if (activeRoute == null || activeRoute.points == null || activeRoute.points.size() < 2) return null;
+
+        int from = Math.max(0, Math.min(nearestRouteIndex, activeRoute.points.size() - 2));
+        GeoPoint a = activeRoute.points.get(from);
+
+        for (int i = from + 1; i < Math.min(activeRoute.points.size(), from + 25); i++) {
+            GeoPoint b = activeRoute.points.get(i);
+            if (straightDistanceMeters(a, b) >= 8.0) {
+                float[] out = new float[2];
+                Location.distanceBetween(
+                        a.getLatitude(), a.getLongitude(),
+                        b.getLatitude(), b.getLongitude(), out);
+                return normalizeDegrees(out[1]);
+            }
         }
         return null;
     }
@@ -797,6 +819,11 @@ public class MainActivity extends Activity implements LocationListener {
         if (!result.points.isEmpty()) {
             map.getController().setZoom(17.7);
             map.getController().animateTo(currentPoint != null ? currentPoint : result.points.get(0));
+            Float initialCourse = routeCourseDegrees();
+            if (initialCourse != null) {
+                lastCourseDegrees = initialCourse;
+                map.setMapOrientation((360f - initialCourse) % 360f, true);
+            }
         }
 
         turnInstruction.setText("출발하세요");
